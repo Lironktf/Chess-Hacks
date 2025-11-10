@@ -3,9 +3,9 @@ import torch.nn as nn
 
 class Model(nn.Module):
     def __init__(self, numClasses):
-        super(Model, self).__init__()
+        super(Model, self).__init__() #make the model inherit from the nn.Module
 
-        self.conv1 = nn.Conv2d(13, 64, kernel_size=4, padding=1)
+        self.conv1 = nn.Conv2d(13, 64, kernel_size=4, padding=1) #make the first cnn layer. this one goes from 13 (13 board states) to 64
         self.conv2 = nn.Conv2d(64, 128, kernel_size=4, padding=1)
         self.flatten = nn.Flatten()
         self.fc1 = nn.Linear(8 * 8 * 128, 256)
