@@ -1,369 +1,459 @@
 """
-Compact Chess Engine - Level 4 (Very Hard)
-Chess bot with neural network evaluation and alpha-beta search at depth 5
+NNUE Chess Bot for Chess-Hacks
+Level 4 - Uses NNUE (Efficiently Updatable Neural Network) architecture
 """
 
 import os
-import sys
 import torch
 import torch.nn as nn
 import chess
+import chess.pgn
+import chess.polyglot
 import numpy as np
-from typing import Optional, Tuple
+from io import StringIO
+from typing import Optional, Tuple, Dict
+from collections import defaultdict
 
 
 # ============================================================================
-# UTILITY FUNCTIONS
+# NNUE MODEL ARCHITECTURE
 # ============================================================================
 
-def board_to_tensor(board: chess.Board) -> np.ndarray:
+# Feature set sizes
+NUM_SQUARES = 64
+NUM_PIECE_TYPES = 6  # P, N, B, R, Q, K
+NUM_COLORS = 2
+
+# HalfKP: For each king position, track all pieces (except kings)
+HALFKP_INPUT_SIZE = 10 * 64  # 640 features per side
+
+
+def halfkp_index(king_square, piece_square, piece_type, piece_color):
     """
-    Convert a chess board to a 13x8x8 tensor representation
-
-    Channels:
-    - 0-5: White pieces (Pawn, Knight, Bishop, Rook, Queen, King)
-    - 6-11: Black pieces (Pawn, Knight, Bishop, Rook, Queen, King)
-    - 12: Legal move destinations
+    Compute HalfKP feature index
 
     Args:
-        board: python-chess Board object
+        king_square: Square of the king (0-63)
+        piece_square: Square of the piece (0-63)
+        piece_type: Type of piece (1-6 for P,N,B,R,Q,K)
+        piece_color: Color of piece (True=White, False=Black)
 
     Returns:
-        numpy array of shape (13, 8, 8)
+        Feature index (0-639) or None if piece is a king
     """
-    tensor = np.zeros((13, 8, 8), dtype=np.float32)
-    piece_map = board.piece_map()
+    # Don't include kings in features
+    if piece_type == chess.KING:
+        return None
 
-    # Encode piece positions (channels 0-11)
-    for square, piece in piece_map.items():
-        row, col = divmod(square, 8)
+    # Adjust piece type (remove king, so Q=4 -> 4)
+    piece_idx = piece_type - 1  # 0-5 for P,N,B,R,Q,K
 
-        # Piece type: 1=pawn, 2=knight, 3=bishop, 4=rook, 5=queen, 6=king
-        piece_type = piece.piece_type - 1  # Convert to 0-indexed
+    # Color offset
+    color_offset = 0 if piece_color == chess.WHITE else 5
 
-        # Color offset: white=0, black=6
-        color_offset = 0 if piece.color == chess.WHITE else 6
+    # Feature index: piece_type * 64 + piece_square
+    feature_idx = (piece_idx + color_offset) * 64 + piece_square
 
-        tensor[piece_type + color_offset, row, col] = 1
-
-    # Encode legal move destinations (channel 12)
-    for move in board.legal_moves:
-        to_square = move.to_square
-        row, col = divmod(to_square, 8)
-        tensor[12, row, col] = 1
-
-    return tensor
+    return feature_idx
 
 
-# ============================================================================
-# NEURAL NETWORK MODEL
-# ============================================================================
-
-class CompactChessNet(nn.Module):
+def board_to_halfkp_features(board: chess.Board):
     """
-    Ultra-compact neural network for chess position evaluation.
+    Convert board to HalfKP feature representation
 
-    Architecture:
-    - Input: 13x8x8 (12 piece planes + 1 legal moves plane)
-    - Conv1: 13 → 32 channels (3x3 kernel)
-    - Conv2: 32 → 64 channels (3x3 kernel)
-    - FC1: 64*8*8 → 128
-    - FC2: 128 → 1 (value head)
+    Returns:
+        white_features: Features from white's perspective (640,)
+        black_features: Features from black's perspective (640,)
+    """
+    white_features = np.zeros(HALFKP_INPUT_SIZE, dtype=np.float32)
+    black_features = np.zeros(HALFKP_INPUT_SIZE, dtype=np.float32)
 
-    Total params: ~680K → ~2.7MB (float32) → ~680KB (int8 quantized)
+    # Find kings
+    white_king_square = board.king(chess.WHITE)
+    black_king_square = board.king(chess.BLACK)
+
+    if white_king_square is None or black_king_square is None:
+        # Invalid position (shouldn't happen in real games)
+        return white_features, black_features
+
+    # Populate features
+    for square, piece in board.piece_map().items():
+        if piece.piece_type == chess.KING:
+            continue  # Don't include kings in features
+
+        # White's perspective (relative to white king)
+        idx = halfkp_index(white_king_square, square, piece.piece_type, piece.color)
+        if idx is not None:
+            white_features[idx] = 1.0
+
+        # Black's perspective (relative to black king, board flipped)
+        flipped_square = square ^ 56  # Flip rank
+        flipped_king_square = black_king_square ^ 56
+        idx = halfkp_index(flipped_king_square, flipped_square, piece.piece_type, not piece.color)
+        if idx is not None:
+            black_features[idx] = 1.0
+
+    return white_features, black_features
+
+
+class NNUE(nn.Module):
+    """
+    NNUE Architecture optimized for chess evaluation
+    Based on Stockfish NNUE architecture
     """
 
-    def __init__(self):
-        super(CompactChessNet, self).__init__()
+    def __init__(self,
+                 input_size=HALFKP_INPUT_SIZE,
+                 hidden1_size=1408,  # Optimized for ~10MB
+                 hidden2_size=32):
+        super(NNUE, self).__init__()
 
-        # Convolutional layers - extract spatial patterns
-        self.conv1 = nn.Conv2d(13, 32, kernel_size=3, padding=1)  # Keep 8x8
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)  # Keep 8x8
+        self.input_size = input_size
+        self.hidden1_size = hidden1_size
+        self.hidden2_size = hidden2_size
 
-        # Batch normalization for better training
-        self.bn1 = nn.BatchNorm2d(32)
-        self.bn2 = nn.BatchNorm2d(64)
+        # Feature transformer (one for each side)
+        self.ft_white = nn.Linear(input_size, hidden1_size)
+        self.ft_black = nn.Linear(input_size, hidden1_size)
 
-        # Fully connected layers - combine features into evaluation
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(64 * 8 * 8, 128)
-        self.fc2 = nn.Linear(128, 1)  # Single output: position evaluation
+        # Layer 2: Combine both perspectives
+        self.fc1 = nn.Linear(hidden1_size * 2, hidden2_size)
 
-        # Activation functions
-        self.relu = nn.ReLU()
-        self.tanh = nn.Tanh()  # Output in [-1, 1] range
+        # Output layer
+        self.fc2 = nn.Linear(hidden2_size, 1)
 
-    def forward(self, x):
+        # ClippedReLU activation (standard in NNUE)
+        self.clipped_relu = lambda x: torch.clamp(torch.relu(x), 0, 1)
+
+    def forward(self, white_features, black_features):
         """
         Forward pass
-        Args:
-            x: Board state tensor (batch_size, 13, 8, 8)
-        Returns:
-            Position evaluation in [-1, 1] range
-            -1 = Black winning, 0 = Draw, +1 = White winning
-        """
-        # Convolutional layers with batch norm
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.relu(self.bn2(self.conv2(x)))
 
-        # Fully connected layers
-        x = self.flatten(x)
-        x = self.relu(self.fc1(x))
-        x = self.tanh(self.fc2(x))  # Squash to [-1, 1]
+        Args:
+            white_features: HalfKP features from white's perspective (batch_size, 640)
+            black_features: HalfKP features from black's perspective (batch_size, 640)
+
+        Returns:
+            Evaluation score (batch_size, 1)
+        """
+        # Feature transformation for both sides
+        white_hidden = self.clipped_relu(self.ft_white(white_features))
+        black_hidden = self.clipped_relu(self.ft_black(black_features))
+
+        # Concatenate both perspectives
+        combined = torch.cat([white_hidden, black_hidden], dim=1)
+
+        # Hidden layers
+        x = self.clipped_relu(self.fc1(combined))
+        x = self.fc2(x)
 
         return x
 
-    def count_parameters(self):
-        """Count total trainable parameters"""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
 
 # ============================================================================
-# CHESS ENGINE - LEVEL 4 (VERY HARD)
+# CHESS ENGINE WITH NNUE
 # ============================================================================
 
-class ChessEngine:
-    """
-    Chess engine that combines neural network evaluation with alpha-beta search
-    Configured for Level 4: Very Hard (depth=5)
-    """
+# Piece values for move ordering
+PIECE_VALUES = {
+    chess.PAWN: 100,
+    chess.KNIGHT: 320,
+    chess.BISHOP: 330,
+    chess.ROOK: 500,
+    chess.QUEEN: 900,
+    chess.KING: 20000
+}
 
-    def __init__(self, model_path: str, device: str = "cpu"):
-        """
-        Initialize the chess engine
+MATE_SCORE = 30000
+MAX_PLY = 100
 
-        Args:
-            model_path: Path to the trained model weights
-            device: Device to run inference on ("cpu" or "cuda")
-        """
+
+class TranspositionTable:
+    """Transposition table for storing previously evaluated positions"""
+
+    EXACT = 0
+    LOWER_BOUND = 1
+    UPPER_BOUND = 2
+
+    def __init__(self, size_mb=2):
+        self.max_entries = int((size_mb * 1024 * 1024) / 16)
+        self.table = {}
+
+    def probe(self, zobrist_hash, depth, alpha, beta):
+        if zobrist_hash not in self.table:
+            return None, None
+
+        entry = self.table[zobrist_hash]
+        stored_depth, stored_score, stored_flag, stored_move = entry
+
+        if stored_depth >= depth:
+            if stored_flag == self.EXACT:
+                return stored_score, stored_move
+            elif stored_flag == self.LOWER_BOUND and stored_score >= beta:
+                return stored_score, stored_move
+            elif stored_flag == self.UPPER_BOUND and stored_score <= alpha:
+                return stored_score, stored_move
+
+        return None, stored_move
+
+    def store(self, zobrist_hash, depth, score, flag, best_move):
+        if zobrist_hash in self.table:
+            old_depth = self.table[zobrist_hash][0]
+            if depth < old_depth:
+                return
+
+        self.table[zobrist_hash] = (depth, score, flag, best_move)
+
+        if len(self.table) > self.max_entries:
+            keys = list(self.table.keys())
+            for key in keys[:len(keys) // 4]:
+                del self.table[key]
+
+
+class NNUEEngine:
+    """Chess engine with NNUE evaluation - Level 4"""
+
+    def __init__(self, model_path: str, device: str = "cpu", tt_size_mb=2):
         self.device = torch.device(device)
-        self.model = CompactChessNet().to(self.device)
+        self.model = NNUE(hidden1_size=1408, hidden2_size=32).to(self.device)
 
         # Load model weights
-        state_dict = torch.load(model_path, map_location=self.device)
+        state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state_dict)
         self.model.eval()
 
+        # Search data structures
+        self.tt = TranspositionTable(size_mb=tt_size_mb)
+        self.killer_moves = [[None, None] for _ in range(MAX_PLY)]
+        self.history = defaultdict(int)
+
         # Statistics
         self.nodes_searched = 0
+        self.tt_hits = 0
 
     def evaluate_position(self, board: chess.Board) -> float:
-        """
-        Evaluate a chess position using the neural network
+        """Evaluate position using NNUE"""
+        white_feat, black_feat = board_to_halfkp_features(board)
 
-        Args:
-            board: Chess board to evaluate
+        white_tensor = torch.tensor(white_feat, dtype=torch.float32).unsqueeze(0).to(self.device)
+        black_tensor = torch.tensor(black_feat, dtype=torch.float32).unsqueeze(0).to(self.device)
 
-        Returns:
-            Evaluation score from the current player's perspective
-            Positive = current player winning, Negative = current player losing
-        """
-        # Convert board to tensor
-        board_tensor = board_to_tensor(board)
-        board_tensor = torch.tensor(board_tensor, dtype=torch.float32).unsqueeze(0)
-        board_tensor = board_tensor.to(self.device)
-
-        # Get evaluation from network
         with torch.no_grad():
-            evaluation = self.model(board_tensor).item()
+            score = self.model(white_tensor, black_tensor).item()
 
-        # The network outputs evaluation from white's perspective
-        # Flip sign if it's black's turn
-        if board.turn == chess.BLACK:
-            evaluation = -evaluation
+        # Convert to centipawns
+        score = score * 200
 
-        return evaluation
+        return score
 
-    def order_moves(self, board: chess.Board):
-        """
-        Order moves for better alpha-beta pruning
+    def mvv_lva_score(self, board: chess.Board, move: chess.Move) -> int:
+        """Most Valuable Victim - Least Valuable Attacker score"""
+        if not board.is_capture(move):
+            return 0
 
-        Move ordering heuristics:
-        1. Captures (ordered by MVV-LVA)
-        2. Checks
-        3. Other moves
+        victim = board.piece_at(move.to_square)
+        attacker = board.piece_at(move.from_square)
 
-        Args:
-            board: Current chess position
+        if victim is None or attacker is None:
+            return 0
 
-        Returns:
-            Ordered list of moves
-        """
+        return PIECE_VALUES[victim.piece_type] * 10 - PIECE_VALUES[attacker.piece_type]
+
+    def order_moves(self, board: chess.Board, ply: int, tt_move: Optional[chess.Move] = None):
+        """Order moves for better alpha-beta pruning"""
         moves = list(board.legal_moves)
+        move_scores = []
 
-        def move_score(move):
+        for move in moves:
             score = 0
 
-            # Prioritize captures (Most Valuable Victim - Least Valuable Attacker)
-            if board.is_capture(move):
-                victim = board.piece_at(move.to_square)
-                attacker = board.piece_at(move.from_square)
-                if victim and attacker:
-                    # Piece values: P=1, N=3, B=3, R=5, Q=9, K=100
-                    piece_values = {1: 1, 2: 3, 3: 3, 4: 5, 5: 9, 6: 100}
-                    score += 10 * piece_values[victim.piece_type]
-                    score -= piece_values[attacker.piece_type]
+            if tt_move and move == tt_move:
+                score = 1_000_000
+            elif board.is_capture(move):
+                mvv_lva = self.mvv_lva_score(board, move)
+                score = 100_000 + mvv_lva
+            elif move in self.killer_moves[ply]:
+                score = 10_000
+            else:
+                score = self.history[(move.from_square, move.to_square)]
 
-            # Prioritize checks
             board.push(move)
             if board.is_check():
-                score += 50
+                score += 5_000
             board.pop()
 
-            # Prioritize center moves in opening
-            if board.fullmove_number < 10:
-                to_square = move.to_square
-                rank, file = divmod(to_square, 8)
-                center_distance = abs(rank - 3.5) + abs(file - 3.5)
-                score -= center_distance
+            if move.promotion:
+                score += 50_000
 
-            return score
+            move_scores.append((move, score))
 
-        # Sort moves by score (descending)
-        moves.sort(key=move_score, reverse=True)
-        return moves
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        return [move for move, _ in move_scores]
 
-    def alpha_beta(
-        self,
-        board: chess.Board,
-        depth: int,
-        alpha: float,
-        beta: float,
-        maximizing: bool
-    ) -> float:
+    def quiescence_search(self, board: chess.Board, alpha: float, beta: float) -> float:
+        """Quiescence search - search all captures to avoid horizon effect"""
+        stand_pat = self.evaluate_position(board)
+
+        if stand_pat >= beta:
+            return beta
+        if alpha < stand_pat:
+            alpha = stand_pat
+
+        for move in board.legal_moves:
+            if not board.is_capture(move):
+                continue
+
+            board.push(move)
+
+            if board.is_valid():
+                score = -self.quiescence_search(board, -beta, -alpha)
+
+                if score >= beta:
+                    board.pop()
+                    return beta
+
+                if score > alpha:
+                    alpha = score
+
+            board.pop()
+
+        return alpha
+
+    def alpha_beta(self, board: chess.Board, depth: int, alpha: float, beta: float, ply: int) -> float:
+        """Alpha-beta search with pruning"""
+        self.nodes_searched += 1
+
+        # Check for draw
+        if board.is_repetition(2) or board.is_fifty_moves() or board.is_insufficient_material():
+            return 0
+
+        # Probe transposition table
+        zobrist = chess.polyglot.zobrist_hash(board)
+        tt_score, tt_move = self.tt.probe(zobrist, depth, alpha, beta)
+        if tt_score is not None:
+            self.tt_hits += 1
+            return tt_score
+
+        # Quiescence search at leaf nodes
+        if depth <= 0:
+            return self.quiescence_search(board, alpha, beta)
+
+        # Check if game is over
+        if board.is_game_over():
+            if board.is_checkmate():
+                return -MATE_SCORE + ply
+            return 0
+
+        # Get ordered moves
+        moves = self.order_moves(board, ply, tt_move)
+
+        if not moves:
+            if board.is_check():
+                return -MATE_SCORE + ply
+            return 0
+
+        best_score = -float('inf')
+        best_move = None
+        flag = TranspositionTable.UPPER_BOUND
+
+        for i, move in enumerate(moves):
+            board.push(move)
+
+            if i == 0:
+                score = -self.alpha_beta(board, depth - 1, -beta, -alpha, ply + 1)
+            else:
+                score = -self.alpha_beta(board, depth - 1, -alpha - 1, -alpha, ply + 1)
+                if alpha < score < beta:
+                    score = -self.alpha_beta(board, depth - 1, -beta, -alpha, ply + 1)
+
+            board.pop()
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+            if score > alpha:
+                alpha = score
+                flag = TranspositionTable.EXACT
+
+            if score >= beta:
+                flag = TranspositionTable.LOWER_BOUND
+
+                if not board.is_capture(move):
+                    if self.killer_moves[ply][0] != move:
+                        self.killer_moves[ply][1] = self.killer_moves[ply][0]
+                        self.killer_moves[ply][0] = move
+
+                    self.history[(move.from_square, move.to_square)] += depth * depth
+
+                break
+
+        self.tt.store(zobrist, depth, best_score, flag, best_move)
+
+        return best_score
+
+    def get_best_move(self, board: chess.Board, depth: int = 4) -> chess.Move:
         """
-        Alpha-beta pruning search
+        Get best move for current position
 
         Args:
             board: Current position
-            depth: Remaining search depth
-            alpha: Alpha value for pruning
-            beta: Beta value for pruning
-            maximizing: Whether this is a maximizing node
+            depth: Search depth (default 4 for Level 4)
 
         Returns:
-            Best evaluation found
-        """
-        self.nodes_searched += 1
-
-        # Base cases
-        if depth == 0:
-            return self.evaluate_position(board)
-
-        if board.is_game_over():
-            result = board.result()
-            if result == "1-0":
-                return 1000 if board.turn == chess.WHITE else -1000
-            elif result == "0-1":
-                return -1000 if board.turn == chess.WHITE else 1000
-            else:
-                return 0  # Draw
-
-        # Get ordered moves for better pruning
-        moves = self.order_moves(board)
-
-        if maximizing:
-            max_eval = -float('inf')
-            for move in moves:
-                board.push(move)
-                eval_score = self.alpha_beta(board, depth - 1, alpha, beta, False)
-                board.pop()
-
-                max_eval = max(max_eval, eval_score)
-                alpha = max(alpha, eval_score)
-
-                if beta <= alpha:
-                    break  # Beta cutoff
-
-            return max_eval
-        else:
-            min_eval = float('inf')
-            for move in moves:
-                board.push(move)
-                eval_score = self.alpha_beta(board, depth - 1, alpha, beta, True)
-                board.pop()
-
-                min_eval = min(min_eval, eval_score)
-                beta = min(beta, eval_score)
-
-                if beta <= alpha:
-                    break  # Alpha cutoff
-
-            return min_eval
-
-    def search(self, board: chess.Board, depth: int = 5) -> Tuple[chess.Move, float]:
-        """
-        Search for the best move using alpha-beta pruning
-        Level 4 default: depth=5
-
-        Args:
-            board: Current chess position
-            depth: Search depth (default 5 for Level 4)
-
-        Returns:
-            Tuple of (best_move, evaluation)
+            Best move
         """
         self.nodes_searched = 0
+        self.tt_hits = 0
 
         best_move = None
-        best_eval = -float('inf')
-        alpha = -float('inf')
-        beta = float('inf')
+        best_score = -float('inf')
+        alpha = -MATE_SCORE
+        beta = MATE_SCORE
 
-        # Search all legal moves
-        moves = self.order_moves(board)
+        moves = self.order_moves(board, 0, None)
 
         for move in moves:
             board.push(move)
-            eval_score = self.alpha_beta(board, depth - 1, alpha, beta, False)
+            score = -self.alpha_beta(board, depth - 1, -beta, -alpha, 1)
             board.pop()
 
-            if eval_score > best_eval:
-                best_eval = eval_score
+            if score > best_score:
+                best_score = score
                 best_move = move
 
-            alpha = max(alpha, eval_score)
+            if score > alpha:
+                alpha = score
 
-        return best_move, best_eval
-
-    def get_move(self, board: chess.Board, search_depth: int = 5) -> chess.Move:
-        """
-        Get the best move for the current position
-        Level 4: search_depth=5 (Very Hard)
-
-        Args:
-            board: Current chess position
-            search_depth: How deep to search (default 5 for Level 4)
-
-        Returns:
-            Best move to play
-        """
-        move, eval_score = self.search(board, depth=search_depth)
-        print(f"Nodes searched: {self.nodes_searched}")
-        print(f"Evaluation: {eval_score:.3f}")
-        return move
+        return best_move
 
 
 # ============================================================================
-# MAIN FUNCTION
+# GLOBAL ENGINE INSTANCE
 # ============================================================================
 
-def main():
-    """
-    Main function to initialize and run the Level 4 chess bot
-    """
-    print("=" * 60)
-    print("COMPACT CHESS BOT - LEVEL 4 (VERY HARD)")
-    print("Search Depth: 5")
-    print("=" * 60)
-    print()
+_engine = None
 
-    # Find the best available model
-    model_files = ["model_int8.pth", "best_model.pth", "final_model.pth"]
+
+def _initialize_engine():
+    """Initialize the NNUE engine (called once)"""
+    global _engine
+
+    if _engine is not None:
+        return _engine
+
+    # Find model file
+    model_files = ["nnue_best.pth", "nnue_model.pth", "best_model.pth", "model.pth"]
     model_path = None
 
-    # Check in current directory and compact directory
-    search_paths = [".", "../compact", "compact"]
+    # Search in multiple locations
+    search_paths = [
+        os.path.dirname(__file__),  # src directory
+        os.path.join(os.path.dirname(__file__), "..", "compact"),  # compact directory
+        ".",
+        "../compact",
+        "compact"
+    ]
 
     for search_path in search_paths:
         for model_file in model_files:
@@ -375,42 +465,77 @@ def main():
             break
 
     if model_path is None:
-        print("❌ No trained model found!")
-        print("\nPlease train a model first or ensure model files are in:")
-        print("  - Current directory")
-        print("  - compact/ directory")
-        print()
-        print("Looking for: model_int8.pth, best_model.pth, or final_model.pth")
-        sys.exit(1)
+        raise FileNotFoundError(
+            "No NNUE model found! Please ensure a trained model (.pth file) is available.\n"
+            f"Looking for: {', '.join(model_files)}\n"
+            f"In directories: {', '.join(search_paths)}"
+        )
 
-    # Get file size
-    model_size = os.path.getsize(model_path) / 1024 / 1024
-    print(f"Loading model: {model_path} ({model_size:.2f} MB)")
+    _engine = NNUEEngine(model_path, device="cpu", tt_size_mb=2)
+    return _engine
 
-    # Load engine
-    try:
-        engine = ChessEngine(model_path)
-        print("✓ Model loaded successfully!")
-        print(f"✓ Level 4 configuration active (search depth: 5)")
-        print()
-    except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        sys.exit(1)
 
-    return engine
+# ============================================================================
+# MAIN API FUNCTION FOR CHESS-HACKS
+# ============================================================================
 
+def get_move(pgn: str) -> str:
+    """
+    Get the best move for the given position
+
+    Args:
+        pgn: Board state as PGN string
+
+    Returns:
+        Best move in UCI format (e.g., "e2e4")
+    """
+    # Parse PGN to get the board position
+    game = chess.pgn.read_game(StringIO(pgn))
+
+    if game is None:
+        # If parsing fails, assume it's the starting position
+        board = chess.Board()
+    else:
+        board = game.end().board()
+
+    # Initialize engine if needed
+    engine = _initialize_engine()
+
+    # Get best move
+    best_move = engine.get_best_move(board, depth=4)
+
+    if best_move is None:
+        # Fallback to any legal move if search fails
+        legal_moves = list(board.legal_moves)
+        if legal_moves:
+            best_move = legal_moves[0]
+        else:
+            raise ValueError("No legal moves available")
+
+    # Return move in UCI format
+    return best_move.uci()
+
+
+# ============================================================================
+# TESTING / STANDALONE MODE
+# ============================================================================
 
 if __name__ == "__main__":
-    # Initialize the Level 4 chess engine
-    engine = main()
-
-    # Engine is ready to use
-    print("Chess engine initialized and ready!")
-    print("Use engine.get_move(board) to get the best move for a position")
+    # Test the bot
+    print("=" * 60)
+    print("NNUE CHESS BOT - LEVEL 4")
+    print("=" * 60)
     print()
 
-    # Example usage
-    print("Example usage:")
-    print("  board = chess.Board()")
-    print("  move = engine.get_move(board, search_depth=5)")
-    print("  board.push(move)")
+    # Test with starting position
+    test_pgn = ""
+
+    try:
+        move = get_move(test_pgn)
+        print(f"Best move from starting position: {move}")
+        print()
+        print("✓ Bot is working correctly!")
+    except Exception as e:
+        print(f"Error: {e}")
+        print("\nNote: You need a trained NNUE model file to use this bot.")
+        print("Expected model files: nnue_best.pth, nnue_model.pth, best_model.pth, or model.pth")
