@@ -13,10 +13,10 @@ This is a STRONG engine designed to maximize playing strength within 10MB
 """
 
 import os
-import torch
-import chess
-import chess.polyglot
-import numpy as np
+import torch  # type: ignore
+import chess# type: ignore
+import chess.polyglot# type: ignore
+import numpy as np# type: ignore
 from typing import Optional, Tuple, Dict
 from collections import defaultdict
 
