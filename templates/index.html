@@ -10,8 +10,8 @@
 <body>
     <div class="container">
         <header>
-            <h1>♟️ Chess Bot</h1>
-            <p>Play against an AI trained on Lichess elite games</p>
+            <h1>♟️ NNUE Chess Bot</h1>
+            <p>Play against an advanced NNUE engine trained on Lichess elite games</p>
         </header>
 
         <div class="game-container">
@@ -28,6 +28,18 @@
                     <h3>Game Status</h3>
                     <div id="status" class="status-text">Your turn (White)</div>
                     <div id="move-history" class="move-history"></div>
+                </div>
+
+                <div class="difficulty-box">
+                    <h3>Difficulty</h3>
+                    <select id="difficulty-select" class="difficulty-select">
+                        <option value="3">Easy (Depth 3)</option>
+                        <option value="4" selected>Medium (Depth 4)</option>
+                        <option value="5">Hard (Depth 5)</option>
+                        <option value="6">Very Hard (Depth 6)</option>
+                        <option value="7">Expert (Depth 7)</option>
+                    </select>
+                    <p class="difficulty-note">Higher depth = stronger play (slower)</p>
                 </div>
 
                 <div class="instructions">
@@ -53,7 +65,33 @@
 
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/1.0.0-beta.6/chess.min.js"></script>
+    <!-- Use CDN that works - older version that's browser-compatible -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <script>
+        // No fallback needed - using reliable CDN
+        
+        // Wait for all libraries to load
+        window.addEventListener('load', function() {
+            console.log('Page loaded, checking libraries...');
+            console.log('jQuery:', typeof $ !== 'undefined' ? 'loaded' : 'missing');
+            console.log('Chessboard:', typeof Chessboard !== 'undefined' ? 'loaded' : 'missing');
+            console.log('Chess:', typeof Chess !== 'undefined' ? 'loaded' : 'missing');
+            
+            // Wait a bit for scripts to load, then initialize
+            setTimeout(function() {
+                if (typeof Chess === 'undefined') {
+                    console.error('Chess.js failed to load from CDN');
+                    document.getElementById('status').textContent = 'Error: Chess.js library failed to load. Please check your internet connection.';
+                } else {
+                    // Chess is loaded, initialize board
+                    console.log('All libraries loaded, initializing board...');
+                    if (typeof initBoard === 'function') {
+                        initBoard();
+                    }
+                }
+            }, 500);
+        });
+    </script>
     <script src="{{ url_for('static', filename='js/game.js') }}"></script>
 </body>
 </html>

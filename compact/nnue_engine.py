@@ -120,6 +120,25 @@ class NNUEEngine:
 
         # Load model weights
         state_dict = torch.load(model_path, map_location=self.device)
+        
+        # Handle different naming conventions (ft_w/ft_b vs ft_white/ft_black)
+        # Map old names to new names if needed
+        if "ft_w.weight" in state_dict and "ft_white.weight" not in state_dict:
+            # Model uses old naming (ft_w, ft_b), map to new names
+            new_state_dict = {}
+            for key, value in state_dict.items():
+                if key == "ft_w.weight":
+                    new_state_dict["ft_white.weight"] = value
+                elif key == "ft_w.bias":
+                    new_state_dict["ft_white.bias"] = value
+                elif key == "ft_b.weight":
+                    new_state_dict["ft_black.weight"] = value
+                elif key == "ft_b.bias":
+                    new_state_dict["ft_black.bias"] = value
+                else:
+                    new_state_dict[key] = value
+            state_dict = new_state_dict
+        
         self.model.load_state_dict(state_dict)
         self.model.eval()
 

@@ -1,5 +1,5 @@
 let board = null;
-let game = new Chess();
+let game = null; // Will be initialized after Chess.js loads
 let boardFlipped = false;
 let playerColor = 'w'; // Player is white
 let botColor = 'b'; // Bot is black
@@ -8,17 +8,66 @@ let moveHistory = [];
 
 // Initialize the board
 function initBoard() {
-    const config = {
-        position: 'start',
-        draggable: true,
-        onDragStart: onDragStart,
-        onDrop: onDrop,
-        onSnapEnd: onSnapEnd,
-        pieceTheme: 'https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/img/chesspieces/wikipedia/{piece}.png'
-    };
-    
-    board = Chessboard('board', config);
-    updateStatus();
+    try {
+        // Check if Chess.js is loaded
+        if (typeof Chess === 'undefined') {
+            console.error('Chess.js not loaded yet!');
+            document.getElementById('status').textContent = 'Error: Chess.js library not loaded. Please refresh the page.';
+            return;
+        }
+        
+        // Initialize game if not already done
+        if (game === null) {
+            game = new Chess();
+            console.log('Chess game initialized');
+        }
+        
+        // Check if element exists
+        const boardElement = document.getElementById('board');
+        if (!boardElement) {
+            console.error('Board element not found!');
+            return;
+        }
+        
+        console.log('Initializing chessboard on element:', boardElement);
+        
+        const config = {
+            position: 'start',
+            draggable: true,
+            onDragStart: onDragStart,
+            onDrop: onDrop,
+            onSnapEnd: onSnapEnd,
+            pieceTheme: 'https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/img/chesspieces/wikipedia/{piece}.png'
+        };
+        
+        // Try different initialization methods
+        if (typeof Chessboard !== 'undefined') {
+            board = Chessboard('board', config);
+        } else if (typeof ChessboardJS !== 'undefined') {
+            board = ChessboardJS('board', config);
+        } else if (typeof window.Chessboard !== 'undefined') {
+            board = window.Chessboard('board', config);
+        } else {
+            throw new Error('Chessboard constructor not found');
+        }
+        
+        if (!board) {
+            console.error('Failed to initialize chessboard - returned null/undefined');
+            document.getElementById('status').textContent = 'Error: Could not initialize chess board';
+            return;
+        }
+        
+        console.log('Chess board initialized:', board);
+        updateStatus();
+        console.log('Chess board initialized successfully');
+    } catch (error) {
+        console.error('Error initializing board:', error);
+        console.error('Stack:', error.stack);
+        const statusEl = document.getElementById('status');
+        if (statusEl) {
+            statusEl.textContent = 'Error: ' + error.message;
+        }
+    }
 }
 
 function onDragStart(source, piece, position, orientation) {
@@ -38,6 +87,12 @@ function onDrop(source, target) {
     // Don't allow moves if it's not player's turn
     if (!isPlayerTurn) {
         return false;
+    }
+    
+    // Check if game is initialized
+    if (!game) {
+        console.error('Game not initialized');
+        return 'snapback';
     }
     
     // Try to make the move
@@ -78,8 +133,11 @@ function makeBotMove() {
     const lastMove = game.history({ verbose: true }).pop();
     const moveUci = lastMove ? `${lastMove.from}${lastMove.to}` : null;
     
+    // Get difficulty/depth from selector
+    const depth = parseInt(document.getElementById('difficulty-select').value);
+    
     // Show loading indicator
-    updateStatus('Bot is thinking... <span class="loading"></span>');
+    updateStatus(`Bot is thinking (depth ${depth})... <span class="loading"></span>`);
     
     fetch('/api/move', {
         method: 'POST',
@@ -88,7 +146,8 @@ function makeBotMove() {
         },
         body: JSON.stringify({
             fen: fen,
-            move: moveUci
+            move: moveUci,
+            depth: depth
         })
     })
     .then(response => response.json())
@@ -177,6 +236,11 @@ function updateStatus(message) {
         return;
     }
     
+    if (!game) {
+        statusDiv.textContent = 'Initializing...';
+        return;
+    }
+    
     if (game.isCheckmate()) {
         statusDiv.textContent = 'Checkmate! ' + (game.turn() === 'w' ? 'Black wins!' : 'White wins!');
     } else if (game.isDraw()) {
@@ -211,10 +275,18 @@ function handleGameOver(winner) {
 }
 
 function startNewGame() {
+    if (typeof Chess === 'undefined') {
+        console.error('Cannot start new game: Chess.js not loaded');
+        alert('Chess library not loaded. Please refresh the page.');
+        return;
+    }
+    
     game = new Chess();
     moveHistory = [];
     isPlayerTurn = true;
-    board.position('start');
+    if (board) {
+        board.position('start');
+    }
     updateStatus();
     document.getElementById('game-over-modal').style.display = 'none';
 }
@@ -226,7 +298,26 @@ function flipBoard() {
 
 // Event listeners
 document.addEventListener('DOMContentLoaded', function() {
-    initBoard();
+    console.log('DOM loaded, checking libraries...');
+    
+    // Wait a bit for scripts to load, then check
+    setTimeout(function() {
+        // Check if required libraries are loaded
+        if (typeof Chessboard === 'undefined') {
+            console.error('Chessboard.js not loaded!');
+            document.getElementById('status').textContent = 'Error: Chessboard library not loaded';
+            return;
+        }
+        
+        if (typeof Chess === 'undefined') {
+            console.error('Chess.js not loaded!');
+            document.getElementById('status').textContent = 'Error: Chess library not loaded. Please refresh the page.';
+            return;
+        }
+        
+        console.log('Libraries loaded, initializing board...');
+        initBoard();
+    }, 100); // Small delay to ensure scripts are loaded
     
     document.getElementById('new-game-btn').addEventListener('click', startNewGame);
     document.getElementById('flip-board-btn').addEventListener('click', flipBoard);
