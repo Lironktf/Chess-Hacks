@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Bot - Play Against AI</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>♟️ Chess Bot</h1>
+            <p>Play against an AI trained on Lichess elite games</p>
+        </header>
+
+        <div class="game-container">
+            <div class="board-container">
+                <div id="board" style="width: 500px"></div>
+                <div class="board-controls">
+                    <button id="new-game-btn" class="btn btn-primary">New Game</button>
+                    <button id="flip-board-btn" class="btn btn-secondary">Flip Board</button>
+                </div>
+            </div>
+
+            <div class="info-panel">
+                <div class="status-box">
+                    <h3>Game Status</h3>
+                    <div id="status" class="status-text">Your turn (White)</div>
+                    <div id="move-history" class="move-history"></div>
+                </div>
+
+                <div class="instructions">
+                    <h3>How to Play</h3>
+                    <ul>
+                        <li>You play as <strong>White</strong></li>
+                        <li>Click a piece, then click a square to move</li>
+                        <li>The bot plays as <strong>Black</strong></li>
+                        <li>Wait for the bot to make its move</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div id="game-over-modal" class="modal">
+            <div class="modal-content">
+                <h2 id="game-over-title">Game Over</h2>
+                <p id="game-over-message"></p>
+                <button id="play-again-btn" class="btn btn-primary">Play Again</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/1.0.0-beta.6/chess.min.js"></script>
+    <script src="{{ url_for('static', filename='js/game.js') }}"></script>
+</body>
+</html>
+
