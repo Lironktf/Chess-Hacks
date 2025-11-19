@@ -1,0 +1,59 @@
+ChessBot NNUE Engine - Final Project Structure
+===============================================
+
+CORE ENGINE FILES (Python)
+---------------------------
+✓ engine.py              - Main API (ChessEngine class)
+✓ nnue.py               - NNUE evaluator (512→256→1, incremental updates)
+✓ search.py             - Alpha-beta search (negamax, PVS, quiescence)
+✓ tt.py                 - Transposition table
+✓ zobrist.py            - Zobrist hashing
+
+TRAINING & UTILITIES
+--------------------
+✓ train_modal_final.py  - Modal training pipeline (GPU distributed)
+✓ utils.py              - Model conversion, benchmarking, testing
+✓ analyze_game.py       - Interactive game analysis tool
+✓ test_engine.py        - Test suite
+
+DOCUMENTATION (3 files only)
+-----------------------------
+✓ README.md             - Project overview, quick start, architecture
+✓ RUN_THIS.md           - Training commands (THE ONE YOU NEED!)
+✓ QUICKSTART.md         - Detailed usage examples and API guide
+
+OTHER
+-----
+✓ requirements.txt      - Dependencies
+✓ .gitignore           - Git ignore rules
+
+DATA (Not in git)
+-----------------
+✓ data/                - Your PGN files (4 files, 2.2GB)
+
+WHAT YOU NEED TO RUN
+====================
+
+TO TRAIN THE MODEL:
+-------------------
+Open RUN_THIS.md and run:
+
+modal run --detach train_modal_final.py::generate_data \
+  --pgn-file data/lichess_elite_2021-01.pgn \
+  --num-positions 50000 \
+  --stockfish-depth 18
+
+TO USE THE ENGINE:
+------------------
+from engine import ChessEngine
+engine = ChessEngine()
+engine.load_weights('model.npz')  # After training
+move, score, info = engine.get_best_move(depth=6)
+
+DOCUMENTATION HIERARCHY:
+------------------------
+1. RUN_THIS.md       → Start here for training
+2. README.md         → Project overview
+3. QUICKSTART.md     → Detailed API examples
+
+All other docs removed for clarity!
