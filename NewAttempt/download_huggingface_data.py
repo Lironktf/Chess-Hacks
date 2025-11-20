@@ -58,12 +58,31 @@ def download_and_convert(
     positions_checked = 0
     positions_kept = 0
 
+    # Safety limits to prevent runaway processing
+    MAX_POSITIONS_KEPT = num_positions * 2  # Allow 2x overage for safety
+    # Safety limit on positions checked - if we've checked 10x the target without getting enough, something is wrong
+    MAX_POSITIONS_CHECKED = max(num_positions * 10, 10_000_000)  # At least 10M, or 10x target
+
     print(f"Processing positions (filtering for depth {min_depth}-{max_depth})...")
+    print(f"Will stop at {num_positions:,} positions kept")
+    print(f"Safety limits: {MAX_POSITIONS_KEPT:,} kept, {MAX_POSITIONS_CHECKED:,} checked")
     print()
 
-    # Iterate through dataset
-    for item in tqdm(dataset, total=num_positions, desc="Extracting"):
+    # Iterate through dataset - NO total since we don't know how many we'll check
+    pbar = tqdm(desc="Extracting", unit=" positions")
+
+    for item in dataset:
         positions_checked += 1
+        pbar.update(1)
+
+        # Safety check - stop if we've checked too many positions
+        if positions_checked >= MAX_POSITIONS_CHECKED:
+            pbar.write(f"\n⚠️  SAFETY LIMIT REACHED: Checked {positions_checked:,} positions")
+            pbar.write(f"   Kept: {positions_kept:,} / {num_positions:,} target")
+            pbar.write(f"   Keep rate: {(positions_kept/positions_checked)*100:.2f}%")
+            pbar.write(f"   Stopping to prevent infinite loop. Consider widening depth range.")
+            pbar.close()
+            break
 
         # Get fields
         fen = item.get('Fen')
@@ -104,15 +123,35 @@ def download_and_convert(
 
         positions_kept += 1
 
+        # Update progress bar with keep count
+        pbar.set_postfix({
+            'kept': f'{positions_kept:,}/{num_positions:,}',
+            'rate': f'{(positions_kept/positions_checked)*100:.1f}%'
+        })
+
         # Stop when we have enough
         if positions_kept >= num_positions:
+            pbar.write(f"\n✓ Target reached! Kept: {positions_kept:,}, Checked: {positions_checked:,}")
+            pbar.close()
             break
 
-        # Progress update every 10k positions checked
-        if positions_checked % 10000 == 0:
-            keep_rate = (positions_kept / positions_checked) * 100
-            print(f"  Checked: {positions_checked:,} | Kept: {positions_kept:,} ({keep_rate:.1f}%)")
+        # Extra safety - print every 100k kept
+        if positions_kept % 100000 == 0:
+            pbar.write(f"  Progress: {positions_kept:,} / {num_positions:,} positions kept")
 
+        # Safety check - emergency stop if something goes wrong (too many kept)
+        if positions_kept >= MAX_POSITIONS_KEPT:
+            pbar.write(f"\n⚠️  SAFETY LIMIT REACHED: {positions_kept:,} positions kept (wanted {num_positions:,})")
+            pbar.write(f"   Something is wrong - stopping to prevent memory issues")
+            pbar.close()
+            break
+
+        # Progress update every 100k positions checked (use tqdm.write to not get overwritten)
+        if positions_checked % 100000 == 0:
+            keep_rate = (positions_kept / positions_checked) * 100
+            pbar.write(f"  Checked: {positions_checked:,} | Kept: {positions_kept:,} ({keep_rate:.2f}%)")
+
+    pbar.close()
     print()
     print(f"✓ Collected {len(training_data):,} positions")
     print(f"  Checked {positions_checked:,} total positions")
