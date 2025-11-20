@@ -28,13 +28,14 @@ model_vol = modal.Volume.from_name("chess-models", create_if_missing=True)
 @app.function(
     image=image,
     gpu="T4",
+    memory=32768,  # Request 32GB memory (more than default)
     timeout=3600 * 6,  # 6 hours max
     volumes={
         "/data": data_vol,
         "/models": model_vol,
     },
 )
-def train(max_games_per_file=50000, num_epochs=200):
+def train(max_games_per_file=25000, num_epochs=200):  # Reduced from 50K to 25K per file
     """Train NNUE with MORE data and MORE epochs"""
     import os
     import time
@@ -62,7 +63,9 @@ def train(max_games_per_file=50000, num_epochs=200):
 
     print(f"Configuration:")
     print(f"  • Games per file: {max_games_per_file:,}")
+    print(f"  • Total games: {max_games_per_file * 4:,} (4 files)")
     print(f"  • Epochs: {num_epochs}")
+    print(f"  • Batch size: 1024 (reduced for memory)")
     print(f"  • Expected training time: 2-4 hours")
     print()
 
@@ -181,8 +184,8 @@ def train(max_games_per_file=50000, num_epochs=200):
     ds = D(X_w, X_b, y)
     tr_sz = int(0.95 * len(ds))
     tr_ds, val_ds = random_split(ds, [tr_sz, len(ds) - tr_sz])
-    tr_ld = DataLoader(tr_ds, batch_size=2048, shuffle=True)  # Larger batch size
-    val_ld = DataLoader(val_ds, batch_size=2048)
+    tr_ld = DataLoader(tr_ds, batch_size=1024, shuffle=True)  # Reduced batch size for memory
+    val_ld = DataLoader(val_ds, batch_size=1024)
 
     print(f"✓ Train: {len(tr_ds):,}, Val: {len(val_ds):,}")
     print()
@@ -278,8 +281,9 @@ def train(max_games_per_file=50000, num_epochs=200):
 def main():
     """Run training"""
     print("Starting improved NNUE training...")
-    print("This will use 50K games per file × 4 files = 200K games")
+    print("This will use 25K games per file × 4 files = 100K games")
     print("Training for up to 200 epochs with early stopping")
+    print("(Reduced from 50K to avoid OOM errors)")
     print()
     train.remote()
     print()

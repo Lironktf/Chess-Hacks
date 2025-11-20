@@ -234,23 +234,16 @@ class NNUEEngine:
         self.tt_hits = 0
         self.qnodes = 0
 
-    def evaluate_position(self, board: chess.Board) -> float:
+    def evaluate_position_fast(self, board: chess.Board) -> float:
         """
-        Hybrid evaluation combining material, piece-square tables, and NNUE
-
-        Since the NNUE model is undertrained, we use:
-        - Material counting as the base (classical evaluation)
-        - Piece-square tables for positional bonuses
-        - NNUE for subtle positional adjustments
+        Fast evaluation - material + piece-square tables only (no NNUE)
+        Used for interior nodes during search
         """
-        # 1. Material and positional evaluation
         material_score = 0
-        positional_score = 0
 
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece:
-                # Material value
                 value = PIECE_VALUES[piece.piece_type]
 
                 # Piece-square table bonus
@@ -269,7 +262,27 @@ class NNUEEngine:
                 else:
                     material_score -= value
 
-        # 2. Get NNUE positional evaluation (small adjustments)
+        # Bonus for checks
+        if board.is_check():
+            material_score += 50 if board.turn else -50
+
+        return material_score
+
+    def evaluate_position(self, board: chess.Board, use_nnue: bool = True) -> float:
+        """
+        Hybrid evaluation combining material, piece-square tables, and NNUE
+
+        use_nnue: If False, only use fast material eval (for interior nodes)
+                 If True, add NNUE evaluation (for leaf nodes)
+        """
+        # Fast material evaluation
+        material_score = self.evaluate_position_fast(board)
+
+        # Only call NNUE at leaf nodes to save computation
+        if not use_nnue:
+            return material_score
+
+        # NNUE positional evaluation (only at leaves)
         white_feat, black_feat = board_to_halfkp_features(board)
         white_tensor = torch.tensor(white_feat, dtype=torch.float32).unsqueeze(0).to(self.device)
         black_tensor = torch.tensor(black_feat, dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -280,7 +293,7 @@ class NNUEEngine:
         # Scale NNUE output as additional positional adjustment (±30 centipawns max)
         nnue_adjustment = nnue_score * 30
 
-        # Combine: material + piece-square tables + NNUE refinement
+        # Combine: material + NNUE refinement
         total_score = material_score + nnue_adjustment
 
         return total_score
@@ -329,11 +342,14 @@ class NNUEEngine:
         move_scores.sort(key=lambda x: x[1], reverse=True)
         return [move for move, _ in move_scores]
 
-    def quiescence_search(self, board: chess.Board, alpha: float, beta: float) -> float:
+    def quiescence_search(self, board: chess.Board, alpha: float, beta: float, depth: int = 0) -> float:
         """Quiescence search - search all captures to avoid horizon effect"""
         self.qnodes += 1
 
-        stand_pat = self.evaluate_position(board)
+        # Use NNUE only at the very end of quiescence (when no more captures)
+        # For interior q-nodes, use fast eval
+        use_nnue = (depth == 0)  # Only use NNUE at first q-node
+        stand_pat = self.evaluate_position(board, use_nnue=use_nnue)
 
         if stand_pat >= beta:
             return beta
@@ -347,7 +363,7 @@ class NNUEEngine:
             board.push(move)
 
             if board.is_valid():
-                score = -self.quiescence_search(board, -beta, -alpha)
+                score = -self.quiescence_search(board, -beta, -alpha, depth + 1)
 
                 if score >= beta:
                     board.pop()
@@ -505,9 +521,7 @@ def get_engine():
 
 @chess_manager.entrypoint
 def test_func(ctx: GameContext):
-    """Main bot logic using NNUE engine"""
-    print(f"Move {len(ctx.board.move_stack) + 1}: Thinking...")
-
+    """Main bot logic using NNUE engine with depth 5 search"""
     legal_moves = list(ctx.board.generate_legal_moves())
     if not legal_moves:
         ctx.logProbabilities({})
@@ -516,17 +530,14 @@ def test_func(ctx: GameContext):
     # Get engine instance (lazy initialization)
     eng = get_engine()
 
-    # Use NNUE engine to find best move
-    best_move, score = eng.get_best_move(ctx.board, depth=4)
+    # Use NNUE engine with depth 5 search
+    best_move, score = eng.get_best_move(ctx.board, depth=5)
 
-    print(f"Best move: {best_move} (eval: {score:.0f})")
-
-    # Log probabilities for visualization (simplified - best move gets high probability)
+    # Log probabilities
     move_probs = {move: 0.01 for move in legal_moves}
     if best_move in move_probs:
         move_probs[best_move] = 0.9
 
-    # Normalize
     total = sum(move_probs.values())
     move_probs = {move: prob / total for move, prob in move_probs.items()}
     ctx.logProbabilities(move_probs)
